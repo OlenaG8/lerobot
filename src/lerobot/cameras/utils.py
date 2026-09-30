@@ -31,6 +31,10 @@ def make_cameras_from_configs(camera_configs: dict[str, CameraConfig]) -> dict[s
             from .opencv import OpenCVCamera
 
             cameras[key] = OpenCVCamera(cfg)
+        elif cfg.type == "chesster":
+            from .chesster.camera_chesster import ChessterCamera
+
+            cameras[key] = ChessterCamera(cfg)
 
         elif cfg.type == "intelrealsense":
             from .realsense.camera_realsense import RealSenseCamera
