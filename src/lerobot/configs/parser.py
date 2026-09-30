@@ -425,6 +425,7 @@ def wrap(config_path: Path | None = None) -> Callable[[F], F]:
                         cli_args = filter_arg("config_path", cli_args)
                         cfg = argtype.from_pretrained(config_path_cli, cli_args=cli_args)
                     else:
+                        import lerobot.cameras.register
                         if config_path_cli:
                             cli_args = filter_arg("config_path", cli_args)
                         cfg = draccus.parse(
