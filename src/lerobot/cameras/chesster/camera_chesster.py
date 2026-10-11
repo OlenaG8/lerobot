@@ -17,7 +17,7 @@ class ChessterCamera(OpenCVCamera):
     def __init__(self, config: ChessterCameraConfig):
         super().__init__(config)
 
-        self._map1, self._map2 = getDistortionMaps(self.index_or_path)
+        self._map1, self._map2 = getDistortionMaps(4)
         self.arucoDetector = ArucoDetector()
         self.corners = None
         self._move = None
