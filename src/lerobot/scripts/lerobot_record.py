@@ -70,15 +70,18 @@ lerobot-record \
 """
 
 import logging
+import random
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from pprint import pformat
 from typing import Any
 
+import cv2
 import torch
 
 from lerobot.cameras import CameraConfig  # noqa: F401
+from lerobot.cameras.chesster import ChessterCamera
 from lerobot.cameras.opencv import OpenCVCameraConfig  # noqa: F401
 from lerobot.cameras.reachy2_camera import Reachy2CameraConfig  # noqa: F401
 from lerobot.cameras.realsense import RealSenseCameraConfig  # noqa: F401
@@ -155,6 +158,13 @@ from lerobot.utils.utils import (
     log_say,
 )
 from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
+
+import chess
+from project.config import *
+from project.vision.board_detector import split_board
+from project.vision.cnn_classifier import ChessCNNClassifier
+from project.chess_engine.board_state import BoardState
+from project.vision.homography import warp_board
 
 
 @dataclass
@@ -311,6 +321,10 @@ def record_loop(
     display_data: bool = False,
     interpolator: ActionInterpolator | None = None,
     display_compressed_images: bool = False,
+
+    chess_camera: ChessterCamera | None = None,
+    chess_cnn=None,
+    chess_board=None,
 ):
     if dataset is not None and dataset.fps != fps:
         raise ValueError(f"The dataset fps should be equal to requested fps ({dataset.fps} != {fps}).")
@@ -358,7 +372,19 @@ def record_loop(
 
     no_action_count = 0
     timestamp = 0
+
+    # -- CHESSTER --
+    if chess_camera.get_move() is None and chess_camera is not None and chess_cnn is not None and chess_board is not None:
+        move = recognize_chess_move(chess_camera, chess_cnn, 100)
+
+        if move is not None:
+            chess_camera.set_move(move)
+            logging.info(f"Detected chess move: {move.uci()}")
+
+    # -- CHESSTER END --
+
     start_episode_t = time.perf_counter()
+
     while timestamp < control_time_s:
         start_loop_t = time.perf_counter()
 
@@ -500,6 +526,13 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
     )
 
     robot = make_robot_from_config(cfg.robot)
+    chess_camera = robot.cameras["front"]
+    if not isinstance(chess_camera, ChessterCamera):
+        raise TypeError(f"Expected chess_camera to be ChessterCamera but got {chess_camera}")
+
+    chess_cnn = ChessCNNClassifier(CNN_MODEL_PATH)
+    chess_board = BoardState()
+
     teleop = make_teleoperator_from_config(cfg.teleop) if cfg.teleop is not None else None
 
     teleop_action_processor, robot_action_processor, robot_observation_processor = make_default_processors()
@@ -614,6 +647,10 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                     display_data=cfg.display_data,
                     interpolator=interpolator,
                     display_compressed_images=display_compressed_images,
+
+                    chess_camera=chess_camera,
+                    chess_cnn=chess_cnn,
+                    chess_board=chess_board,
                 )
 
                 # Execute a few seconds without recording to give time to manually reset the environment
@@ -634,7 +671,13 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                         control_time_s=cfg.dataset.reset_time_s,
                         single_task=cfg.dataset.single_task,
                         display_data=cfg.display_data,
+
+                        chess_camera=chess_camera,
+                        chess_cnn=chess_cnn,
+                        chess_board=chess_board,
                     )
+
+                chess_camera.set_move(None)
 
                 if events["rerecord_episode"]:
                     log_say("Re-record episode", cfg.play_sounds)
@@ -664,6 +707,61 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
 
         log_say("Exiting", cfg.play_sounds)
     return dataset
+
+def choose_random_move(cnn_state) -> chess.Move:
+    black_squares = [i for i, value in enumerate(cnn_state) if value == 0]
+    empty_squares = [i for i, value in enumerate(cnn_state) if value == 1]
+
+    if not black_squares:
+        raise ValueError("No black figures found.")
+    if not empty_squares:
+        raise ValueError("No empty squares found.")
+
+    from_index = random.choice(black_squares)
+    to_index = random.choice(empty_squares)
+
+    from_square = chess.square(from_index % 8, 7 - from_index // 8)
+    to_square = chess.square(to_index % 8, 7 - to_index // 8)
+
+    return chess.Move(from_square, to_square)
+
+def recognize_chess_move(camera: ChessterCamera, cnn, max_frames: int = 10) -> chess.Move:
+    last_err = "Unknown error"
+
+    for attempt in range(max_frames):
+        frame = camera.read_latest()
+        if frame is None:
+            last_err = "Could not read frame from camera."
+            precise_sleep(0.1)
+            continue
+
+        #cv2.imwrite(f"debug_frame_{attempt}.jpg", cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+
+        if camera.corners is None:
+            last_err = "Could not detect corners from camera."
+            precise_sleep(0.1)
+            continue
+
+        board_img = warp_board(frame, camera.corners)
+        squares = split_board(board_img)
+        cnn_state = []
+
+        i = 0
+        for sq, img in squares.items():
+            #img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            #cv2.imwrite(f"Square:{i}.jpg", img)
+            i += 1
+            cls = cnn.predict(img)
+            cnn_state.append(cls // 2)
+
+        print(cnn_state)
+
+        move = choose_random_move(cnn_state)
+        print("Move:", chess.square_name(move.from_square), "->", chess.square_name(move.to_square))
+
+        return move
+
+    raise RuntimeError(f"Failed after {max_frames} frames. Last error: {last_err}")
 
 
 def main():
